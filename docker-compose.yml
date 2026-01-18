@@ -1,0 +1,163 @@
+version: '3.8'
+
+services:
+  # MySQL Database
+  mysql:
+    image: mysql:8.0
+    container_name: fraudnet-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root_password
+      MYSQL_DATABASE: fraudnet_ai
+      MYSQL_USER: fraudnet_user
+      MYSQL_PASSWORD: fraudnet_password
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./docker/mysql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      timeout: 10s
+      retries: 5
+      interval: 30s
+    networks:
+      - fraudnet-network
+
+  # Redis for caching (optional)
+  redis:
+    image: redis:7-alpine
+    container_name: fraudnet-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      timeout: 10s
+      retries: 5
+      interval: 30s
+    networks:
+      - fraudnet-network
+
+  # FraudNet.AI Application
+  app:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    container_name: fraudnet-app
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    environment:
+      # Flask configuration
+      FLASK_ENV: production
+      FLASK_HOST: 0.0.0.0
+      FLASK_PORT: 5000
+      
+      # Database configuration
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_NAME: fraudnet_ai
+      DB_USER: fraudnet_user
+      DB_PASSWORD: fraudnet_password
+      
+      # Application configuration
+      SECRET_KEY: your-secret-key-change-in-production
+      MODEL_ARTIFACTS_PATH: /app/artifacts
+      LOG_LEVEL: INFO
+      LOG_FORMAT: json
+      
+      # API configuration
+      API_RATE_LIMIT: 100/minute
+      
+      # Feature engineering
+      FEATURE_WINDOW_HOURS: 24
+      
+      # Model training
+      MODEL_RETRAIN_THRESHOLD_DAYS: 7
+      
+    volumes:
+      - ./artifacts:/app/artifacts
+      - ./logs:/app/logs
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/v1/health/live"]
+      timeout: 10s
+      retries: 5
+      interval: 30s
+      start_period: 40s
+    networks:
+      - fraudnet-network
+
+  # Nginx reverse proxy
+  nginx:
+    image: nginx:alpine
+    container_name: fraudnet-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./docker/nginx/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - app
+    networks:
+      - fraudnet-network
+
+  # Prometheus monitoring (optional)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: fraudnet-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    networks:
+      - fraudnet-network
+
+  # Grafana for dashboards (optional)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: fraudnet-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning
+    networks:
+      - fraudnet-network
+
+volumes:
+  mysql_data:
+    driver: local
+  redis_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+networks:
+  fraudnet-network:
+    driver: bridge
